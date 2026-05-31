@@ -10,6 +10,7 @@
 #include <media/videobuf2-v4l2.h>
 
 #include "vpipe.h"
+#include "vpipe-source.h"
 
 #define VPIPE_NAME "vpipe"
 #define VPIPE_DEFAULT_WIDTH 640U
@@ -53,6 +54,7 @@ struct vpipe_buffer {
     u32 algo_id;
     u32 threshold;
     struct vpipe_roi roi;
+    struct vpipe_frame_desc src_desc;
 };
 
 struct vpipe_dev {
@@ -74,6 +76,7 @@ struct vpipe_ctx {
     u32 algo_id;
     u32 threshold;
     struct vpipe_roi roi;
+    struct vpipe_source *src;
 };
 
 int vpipe_meta_init(void);

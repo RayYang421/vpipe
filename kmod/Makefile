@@ -1,5 +1,5 @@
 obj-m := vpipe.o
-vpipe-objs := vpipe-m2m.o vpipe-meta.o vpipe-cv.o
+vpipe-objs := vpipe-m2m.o vpipe-meta.o vpipe-cv.o vpipe-source.o
 
 KDIR ?= /lib/modules/$(shell uname -r)/build
 PWD := $(shell pwd)
