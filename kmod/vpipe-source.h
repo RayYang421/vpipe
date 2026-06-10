@@ -53,5 +53,6 @@ int vpipe_source_reset(struct vpipe_source *src);
 int vpipe_source_next_frame(struct vpipe_source *src, struct vpipe_buffer *buf, struct vpipe_frame_desc *desc);
 
 int vpipe_source_register(enum vpipe_backend_id id, const struct vpipe_source_ops *ops, const char *name);
+int vpipe_source_fixture_register(void);
 
 #endif /* __VPIPE_SOURCE_H__ */
