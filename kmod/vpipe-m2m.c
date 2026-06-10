@@ -12,6 +12,7 @@
 #include <media/videobuf2-vmalloc.h>
 
 #include "vpipe-internal.h"
+#include "vpipe-source.h"
 
 static struct vpipe_dev g_vpipe_dev;
 static atomic_t g_vpipe_instance = ATOMIC_INIT(0);
@@ -168,6 +169,12 @@ static void vpipe_buf_queue(struct vb2_buffer *vb)
         buf->algo_id = ctx->algo_id;
         buf->threshold = ctx->threshold;
         buf->roi = ctx->roi;
+
+        /* Ask the source backend to stamp this buffer with its provenance.
+         * FIXTURE is a no-op; the helper still fills backend_id, sequence,
+         * and timestamp so metadata downstream stays consistent.
+         */
+        vpipe_source_next_frame(ctx->src, buf, &buf->src_desc);
     }
 
     v4l2_m2m_buf_queue(ctx->m2m_ctx, &buf->m2m_buf.vb);
@@ -175,6 +182,11 @@ static void vpipe_buf_queue(struct vb2_buffer *vb)
 
 static int vpipe_start_streaming(struct vb2_queue *q, unsigned int count)
 {
+    struct vpipe_ctx *ctx = vb2_get_drv_priv(q);
+
+    if (V4L2_TYPE_IS_OUTPUT(q->type))
+        return vpipe_source_start(ctx->src, ctx);
+
     return 0;
 }
 
@@ -199,6 +211,9 @@ static void vpipe_return_all_buffers(struct vpipe_ctx *ctx,
 static void vpipe_stop_streaming(struct vb2_queue *q)
 {
     struct vpipe_ctx *ctx = vb2_get_drv_priv(q);
+
+    if (V4L2_TYPE_IS_OUTPUT(q->type))
+        vpipe_source_stop(ctx->src);
 
     vpipe_return_all_buffers(ctx, q->type);
 }
@@ -520,6 +535,18 @@ static int vpipe_open(struct file *file)
 
     ctx->fh.m2m_ctx = ctx->m2m_ctx;
 
+    ctx->src = vpipe_source_create(VPIPE_BACKEND_FIXTURE);
+    if (IS_ERR(ctx->src)) {
+        int err = PTR_ERR(ctx->src);
+
+        v4l2_m2m_ctx_release(ctx->m2m_ctx);
+        v4l2_fh_del(&ctx->fh);
+        v4l2_fh_exit(&ctx->fh);
+        v4l2_ctrl_handler_free(&ctx->ctrl_handler);
+        kfree(ctx);
+        return err;
+    }
+
     return 0;
 }
 
@@ -528,6 +555,7 @@ static int vpipe_release(struct file *file)
     struct v4l2_fh *fh = file->private_data;
     struct vpipe_ctx *ctx = fh_to_ctx(fh);
 
+    vpipe_source_destroy(ctx->src);
     v4l2_m2m_ctx_release(ctx->m2m_ctx);
     v4l2_ctrl_handler_free(&ctx->ctrl_handler);
     v4l2_fh_del(&ctx->fh);
@@ -577,6 +605,12 @@ static int __init vpipe_init(void)
     ret = vpipe_meta_init();
     if (ret)
         return ret;
+
+    ret = vpipe_source_fixture_register();
+    if (ret) {
+        vpipe_meta_exit();
+        return ret;
+    }
 
     mutex_init(&g_vpipe_dev.dev_lock);
     atomic64_set(&g_vpipe_dev.sequence, 0);
