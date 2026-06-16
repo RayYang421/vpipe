@@ -18,12 +18,22 @@ enum vpipe_backend_id {
     VPIPE_BACKEND_MAX,
 };
 
+/* Frame descriptor flags */
+#define VPIPE_FRAME_FLAG_DROPPED (1U << 0)
+
 struct vpipe_frame_desc {
     u64 source_timestamp_ns;
     u32 sequence;
     u32 backend_id;
     u32 byteused;
     u32 flags;
+    /* Geometry hints provided by the m2m layer so in-kernel backends
+     * do not need to traverse vb2_queue -> drv_priv to obtain frame
+     * dimensions. Populated by vpipe_buf_queue() on the OUTPUT side.
+     */
+    u32 width;
+    u32 height;
+    u32 stride;
 };
 
 struct vpipe_source_ops {
@@ -31,7 +41,21 @@ struct vpipe_source_ops {
     void (*stop)(struct vpipe_source *src);
     int (*reset)(struct vpipe_source *src);
 
-    int (*next_frame)(struct vpipe_source *src, struct vpipe_buffer *buf, struct vpipe_frame_desc *desc);
+    int (*next_frame)(struct vpipe_source *src, struct vpipe_buffer *buf,
+                      struct vpipe_frame_desc *desc);
+
+    /* Optional: export the backend's producer surface as a DMA-BUF fd
+     * for downstream import. Implemented by the vcam-derived backend for
+     * the source-side DMA-BUF handoff; NULL on backends that do not
+     * participate in cross-driver buffer sharing. The buf argument may be
+     * NULL for source-side exporters that export their own framebuffer
+     * rather than a specific m2m buffer.
+     *
+     * On success, returns a non-negative fd; the caller owns it and
+     * must close() when done.
+     */
+    int (*export_dmabuf)(struct vpipe_source *src,
+                         struct vpipe_buffer *buf);
 };
 
 struct vpipe_source {
@@ -52,7 +76,17 @@ int vpipe_source_reset(struct vpipe_source *src);
 
 int vpipe_source_next_frame(struct vpipe_source *src, struct vpipe_buffer *buf, struct vpipe_frame_desc *desc);
 
+/* Optional helper: invokes ops->export_dmabuf if implemented;
+ * returns -ENOTSUPP otherwise.
+ */
+int vpipe_source_export_dmabuf(struct vpipe_source *src,
+                               struct vpipe_buffer *buf);
+
 int vpipe_source_register(enum vpipe_backend_id id, const struct vpipe_source_ops *ops, const char *name);
+
+/* Per-backend registration helpers (called from module init). */
 int vpipe_source_fixture_register(void);
+int vpipe_source_synthetic_register(void);
+int vpipe_source_vcam_register(void);
 
 #endif /* __VPIPE_SOURCE_H__ */

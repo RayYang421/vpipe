@@ -170,6 +170,14 @@ static void vpipe_buf_queue(struct vb2_buffer *vb)
         buf->threshold = ctx->threshold;
         buf->roi = ctx->roi;
 
+        /* Provide geometry hints so in-kernel backends (SYNTHETIC,
+         * future VCAM-derived) can fill buffers without walking the
+         * vb2 queue back to ctx for dimensions.
+         */
+        buf->src_desc.width = ctx->out_q.width;
+        buf->src_desc.height = ctx->out_q.height;
+        buf->src_desc.stride = ctx->out_q.bytesperline;
+
         /* Ask the source backend to stamp this buffer with its provenance.
          * FIXTURE is a no-op; the helper still fills backend_id, sequence,
          * and timestamp so metadata downstream stays consistent.
@@ -184,6 +192,7 @@ static int vpipe_start_streaming(struct vb2_queue *q, unsigned int count)
 {
     struct vpipe_ctx *ctx = vb2_get_drv_priv(q);
 
+    /* Only signal the source backend once, on the OUTPUT side. */
     if (V4L2_TYPE_IS_OUTPUT(q->type))
         return vpipe_source_start(ctx->src, ctx);
 
@@ -535,6 +544,7 @@ static int vpipe_open(struct file *file)
 
     ctx->fh.m2m_ctx = ctx->m2m_ctx;
 
+    /* Default to the FIXTURE backend; userspace can switch later. */
     ctx->src = vpipe_source_create(VPIPE_BACKEND_FIXTURE);
     if (IS_ERR(ctx->src)) {
         int err = PTR_ERR(ctx->src);
@@ -565,6 +575,53 @@ static int vpipe_release(struct file *file)
     return 0;
 }
 
+static long vpipe_default_ioctl(struct file *file, void *fh,
+                                bool valid_prio, unsigned int cmd,
+                                void *arg)
+{
+    struct vpipe_ctx *ctx = fh_to_ctx(fh);
+    struct vpipe_source *new_src;
+    struct vb2_queue *out_vq, *cap_vq;
+    u32 backend_id;
+    int fd;
+
+    switch (cmd) {
+    case VPIPE_IOC_SET_BACKEND:
+        backend_id = *(u32 *) arg;
+
+        /* Reject switching while streaming so in-flight buffers stay
+         * paired with the producer that stamped them.
+         */
+        out_vq = v4l2_m2m_get_vq(ctx->m2m_ctx,
+                                 V4L2_BUF_TYPE_VIDEO_OUTPUT);
+        cap_vq = v4l2_m2m_get_vq(ctx->m2m_ctx,
+                                 V4L2_BUF_TYPE_VIDEO_CAPTURE);
+        if (vb2_is_streaming(out_vq) || vb2_is_streaming(cap_vq))
+            return -EBUSY;
+
+        new_src = vpipe_source_create(backend_id);
+        if (IS_ERR(new_src))
+            return PTR_ERR(new_src);
+
+        vpipe_source_destroy(ctx->src);
+        ctx->src = new_src;
+
+        pr_info("ctx switched to backend %u (%s)\n", new_src->backend_id,
+                new_src->name);
+        return 0;
+
+    case VPIPE_IOC_EXPORT_SRC_DMABUF:
+        fd = vpipe_source_export_dmabuf(ctx->src, NULL);
+        if (fd < 0)
+            return fd;
+        *(__s32 *) arg = fd;
+        return 0;
+
+    default:
+        return -ENOTTY;
+    }
+}
+
 static const struct v4l2_ioctl_ops vpipe_ioctl_ops = {
     .vidioc_querycap = vpipe_querycap,
     .vidioc_enum_fmt_vid_cap = vpipe_enum_fmt,
@@ -586,6 +643,7 @@ static const struct v4l2_ioctl_ops vpipe_ioctl_ops = {
     .vidioc_streamoff = v4l2_m2m_ioctl_streamoff,
     .vidioc_subscribe_event = v4l2_ctrl_subscribe_event,
     .vidioc_unsubscribe_event = v4l2_event_unsubscribe,
+    .vidioc_default = vpipe_default_ioctl,
 };
 
 static const struct v4l2_file_operations vpipe_fops = {
@@ -607,6 +665,18 @@ static int __init vpipe_init(void)
         return ret;
 
     ret = vpipe_source_fixture_register();
+    if (ret) {
+        vpipe_meta_exit();
+        return ret;
+    }
+
+    ret = vpipe_source_synthetic_register();
+    if (ret) {
+        vpipe_meta_exit();
+        return ret;
+    }
+
+    ret = vpipe_source_vcam_register();
     if (ret) {
         vpipe_meta_exit();
         return ret;

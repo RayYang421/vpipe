@@ -70,4 +70,7 @@ struct vpipe_meta_stats {
 #define VPIPE_META_IOC_GET_STATS \
     _IOR(VPIPE_META_IOC_MAGIC, 0x01, struct vpipe_meta_stats)
 
+#define VPIPE_IOC_SET_BACKEND _IOW('V', BASE_VIDIOC_PRIVATE + 0, __u32)
+#define VPIPE_IOC_EXPORT_SRC_DMABUF _IOR('V', BASE_VIDIOC_PRIVATE + 1, __s32)
+
 #endif

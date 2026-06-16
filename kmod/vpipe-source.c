@@ -101,12 +101,24 @@ int vpipe_source_next_frame(struct vpipe_source *src,
                             struct vpipe_buffer *buf,
                             struct vpipe_frame_desc *desc)
 {
+    u32 width, height, stride;
     int ret;
 
     if (!src || !src->ops || !src->ops->next_frame || !buf || !desc)
         return -EINVAL;
 
+    /* Preserve geometry hints across the descriptor reset so backends
+     * see consistent dimensions regardless of memset ordering.
+     */
+    width = desc->width;
+    height = desc->height;
+    stride = desc->stride;
+
     memset(desc, 0, sizeof(*desc));
+
+    desc->width = width;
+    desc->height = height;
+    desc->stride = stride;
 
     ret = src->ops->next_frame(src, buf, desc);
     if (ret)
@@ -116,6 +128,19 @@ int vpipe_source_next_frame(struct vpipe_source *src,
         desc->source_timestamp_ns = ktime_get_ns();
 
     desc->backend_id = src->backend_id;
-    desc->sequence   = src->seq++;
+    desc->sequence = src->seq++;
     return 0;
+}
+
+int vpipe_source_export_dmabuf(struct vpipe_source *src,
+                               struct vpipe_buffer *buf)
+{
+    /* buf may be NULL: source-side exporters (vcam-derived) export the
+     * backend's own producer surface rather than a specific m2m buffer.
+     */
+    if (!src || !src->ops)
+        return -EINVAL;
+    if (!src->ops->export_dmabuf)
+        return -EOPNOTSUPP;
+    return src->ops->export_dmabuf(src, buf);
 }
