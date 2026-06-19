@@ -1,36 +1,4 @@
 // SPDX-License-Identifier: MIT
-/*
- * vpipe VCAM-derived source backend
- *
- * Models the camera-like producer behaviour distilled from vcam without
- * turning vpipe into a full camera driver. The backend keeps an internal
- * "framebuffer" (the vcam-style injection surface), mutates it
- * deterministically per frame, and copies it into the OUTPUT vb2 buffer
- * when the m2m layer calls next_frame(). That copy is the source-side
- * injection cost the Task 4 benchmark attributes.
- *
- * Properties this backend provides (Task 3):
- *
- *   - deterministic frame production: the framebuffer content is a pure
- *     function of (geometry, frame index), so a given frame index always
- *     yields the same bytes and CRC.
- *   - fixed FPS mode: source_timestamp_ns advances by exactly one
- *     1/fps interval per produced frame, modelling a hardware capture
- *     clock. Real pacing of QBUF is still the userspace runner's job, so
- *     no in-kernel timer or kthread is introduced (matches the vpipe
- *     integration rule of "userspace controls fixed-FPS rhythm").
- *   - fixed frame sequence: the framework stamps desc->sequence from
- *     src->seq; this backend tracks its own frames_produced in lockstep.
- *   - synthetic framebuffer mutation: a moving gradient plus a per-frame
- *     marker byte advances each frame.
- *   - optional dropped-frame simulation: vcam_drop_every drops every
- *     N-th frame (flagged, not filled), mirroring the SYNTHETIC backend.
- *   - source-side timestamp: provided by the backend, not the framework.
- *   - source-side DMA-BUF export: the internal framebuffer is exported
- *     as a dma-buf fd (export_dmabuf), letting a downstream importer map
- *     the same producer pages. The backing storage is kref-counted so the
- *     exported dma-buf safely outlives STREAMOFF / backend teardown.
- */
 
 #define pr_fmt(fmt) "vpipe-vcam: " fmt
 
@@ -56,43 +24,32 @@
 #include "vpipe-internal.h"
 #include "vpipe-source.h"
 
-/* Simulated capture rate. Drives the source-side timestamp cadence only;
- * actual QBUF pacing stays in userspace. Read at start() time.
- */
+
 static unsigned int vcam_fps = 30;
 module_param(vcam_fps, uint, 0644);
 MODULE_PARM_DESC(vcam_fps,
                  "VCAM-derived backend: simulated capture FPS for the "
                  "source-side timestamp cadence (0 disables advancing)");
 
-/* Drop every N-th frame (0 disables). Read at start() time. */
 static unsigned int vcam_drop_every;
 module_param(vcam_drop_every, uint, 0644);
 MODULE_PARM_DESC(vcam_drop_every,
                  "VCAM-derived backend: drop every N-th frame (0 disables)");
 
-/*
- * Refcounted backing store for the producer framebuffer.
- *
- * Held by the backend (one ref from start()) and by every exported
- * dma-buf (one ref each). Freed when the last ref drops, so a userspace
- * consumer holding an exported fd past STREAMOFF never dereferences freed
- * memory. Allocated with vmalloc_user() so the dma-buf .mmap path can hand
- * the same pages to userspace via remap_vmalloc_range().
- */
+
 struct vcam_fb {
     struct kref refcount;
-    void *vaddr;          /* vmalloc_user area, page-multiple */
-    unsigned long size;   /* page-aligned byte length */
+    void *vaddr;
+    unsigned long size;
 };
 
 struct vpipe_vcam_priv {
-    struct vcam_fb *fb;     /* producer surface, shared with dma-buf exports */
-    u32 pattern_offset;     /* mutation phase, advanced per produced frame */
-    u32 frames_produced;    /* total next_frame() invocations */
-    u32 drop_every_n;       /* snapshot of vcam_drop_every */
-    u64 base_ts_ns;         /* synthetic capture-clock anchor */
-    u64 frame_interval_ns;  /* 1/fps in ns, 0 when fps == 0 */
+    struct vcam_fb *fb;
+    u32 pattern_offset;
+    u32 frames_produced;
+    u32 drop_every_n;
+    u64 base_ts_ns;
+    u64 frame_interval_ns;
 };
 
 static void vcam_fb_release(struct kref *kref)
@@ -122,11 +79,6 @@ static struct vcam_fb *vcam_fb_alloc(unsigned long bytes)
     return fb;
 }
 
-/*
- * Deterministic mutation: moving gradient with a per-frame marker in the
- * first byte. Output depends only on (width, height, stride, offset), so a
- * frame index is reproducible across runs for CRC validation.
- */
 static void vcam_fill_gradient(u8 *dst, u32 width, u32 height, u32 stride,
                                u32 offset)
 {
@@ -139,11 +91,9 @@ static void vcam_fill_gradient(u8 *dst, u32 width, u32 height, u32 stride,
             row[x] = (u8) ((x + y + offset) & 0xFF);
     }
 
-    /* Marker so consecutive frames differ even at offset wrap-around. */
     dst[0] = (u8) (offset & 0xFF);
 }
 
-/* ---- dma-buf exporter over the producer framebuffer -------------------- */
 
 static struct sg_table *vcam_dmabuf_map(struct dma_buf_attachment *att,
                                         enum dma_data_direction dir)
@@ -198,13 +148,7 @@ static void vcam_dmabuf_unmap(struct dma_buf_attachment *att,
     kfree(sgt);
 }
 
-/*
- * CPU-access fences. No-ops here because the producer surface is a plain
- * CPU mapping with no device-private caches, but kept as explicit hook
- * points: this is where a real hardware-backed source would invalidate or
- * flush caches, and where the Task 4 benchmark attributes synchronization
- * overhead and buffer-ownership transfer cost.
- */
+
 static int vcam_dmabuf_begin_cpu(struct dma_buf *dmabuf,
                                  enum dma_data_direction dir)
 {
@@ -259,7 +203,6 @@ static const struct dma_buf_ops vcam_dmabuf_ops = {
     .release = vcam_dmabuf_release,
 };
 
-/* ---- backend ops ------------------------------------------------------- */
 
 static int vcam_start(struct vpipe_source *src, struct vpipe_ctx *ctx)
 {
@@ -339,17 +282,9 @@ static int vcam_next_frame(struct vpipe_source *src,
     if (!dst)
         return -EFAULT;
 
-    /* Source-side timestamp from the synthetic capture clock. Set before
-     * any early return so dropped frames still carry a cadence-correct
-     * timestamp and the framework does not overwrite it with ktime.
-     */
     desc->source_timestamp_ns =
         priv->base_ts_ns + priv->frames_produced * priv->frame_interval_ns;
 
-    /* Dropped-frame simulation: flag and skip the fill/copy. The framework
-     * still stamps backend_id, sequence, and the timestamp above, so
-     * downstream sees a flagged frame rather than a sequence gap.
-     */
     if (priv->drop_every_n &&
         (priv->frames_produced % priv->drop_every_n) == 0) {
         desc->flags |= VPIPE_FRAME_FLAG_DROPPED;
@@ -357,13 +292,11 @@ static int vcam_next_frame(struct vpipe_source *src,
         return 0;
     }
 
-    /* Mutate the producer framebuffer, then inject it into the OUTPUT
-     * buffer. The memcpy is the source-side injection cost Task 4 measures
-     * against the DMA-BUF export path.
-     */
+
     vcam_fill_gradient(priv->fb->vaddr, desc->width, desc->height,
                        desc->stride, priv->pattern_offset);
-    memcpy(dst, priv->fb->vaddr, frame_bytes);
+    if (dst != priv->fb->vaddr)
+        memcpy(dst, priv->fb->vaddr, frame_bytes);
 
     desc->byteused = (u32) frame_bytes;
     priv->pattern_offset++;
@@ -379,11 +312,11 @@ static int vcam_export_dmabuf(struct vpipe_source *src,
     struct dma_buf *dmabuf;
     int fd;
 
-    /* Export requires an active producer surface (allocated at start()). */
+
     if (!priv || !priv->fb)
         return -EINVAL;
 
-    /* Hand the exported dma-buf its own reference on the backing store. */
+
     kref_get(&priv->fb->refcount);
 
     exp_info.ops = &vcam_dmabuf_ops;
@@ -399,7 +332,7 @@ static int vcam_export_dmabuf(struct vpipe_source *src,
 
     fd = dma_buf_fd(dmabuf, O_CLOEXEC);
     if (fd < 0)
-        dma_buf_put(dmabuf); /* drops the export ref via .release */
+        dma_buf_put(dmabuf);
 
     return fd;
 }
