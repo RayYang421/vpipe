@@ -27,10 +27,12 @@ def load_perf(path):
                 continue
             value = row[0].strip()
             event = row[2].strip()
-            if not value or value == "<not counted>":
+            if not value or value == ("<not counted>", "<not supported>"):
                 continue
+            if "/" in event:
+                event = event.split("/")[1]
             try:
-                metrics[event] = float(value)
+                metrics[event] = metrics.get(event, 0.0) + float(value)
             except ValueError:
                 continue
     return metrics
@@ -163,7 +165,8 @@ def main():
     if len(sys.argv) != 3:
         print(
             "usage: summarize-benchmark.py "
-            "phase1|phase2|phase_m2m|phase_fixture|phase_userptr csv_path",
+            "phase1|phase2|phase_m2m|phase_fixture|phase_vcam|phase_userptr "
+            "csv_path",
             file=sys.stderr,
         )
         return 1
@@ -181,6 +184,10 @@ def main():
             csv_path, "vivid_dq_monotonic_ns", "vpipe_dq_monotonic_ns"
         )
     elif mode == "phase_fixture":
+        summary = summarize_latency_csv(
+            csv_path, "enqueue_monotonic_ns", "dequeue_monotonic_ns"
+        )
+    elif mode == "phase_vcam":
         summary = summarize_latency_csv(
             csv_path, "enqueue_monotonic_ns", "dequeue_monotonic_ns"
         )
