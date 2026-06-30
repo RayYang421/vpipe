@@ -55,6 +55,8 @@ struct vpipe_buffer {
     u32 threshold;
     struct vpipe_roi roi;
     struct vpipe_frame_desc src_desc;
+    u64 qbuf_ns;
+    struct vpipe_meta_entry meta_pending;
 };
 
 struct vpipe_dev {

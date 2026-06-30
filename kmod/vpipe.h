@@ -6,11 +6,12 @@
 #include <linux/types.h>
 #include <linux/videodev2.h>
 
-#define VPIPE_META_VERSION 1
+#define VPIPE_META_VERSION 2
 #define VPIPE_META_IOC_MAGIC 'p'
 
-#define VPIPE_META_F_OVERRUN (1U << 0)
-#define VPIPE_META_F_HW_TS (1U << 1)
+#define VPIPE_META_F_OVERRUN  (1U << 0)
+#define VPIPE_META_F_HW_TS    (1U << 1)
+#define VPIPE_META_F_DROPPED  (1U << 2)
 
 #define VPIPE_ALGO_NONE 0
 #define VPIPE_ALGO_THRESHOLD 1
@@ -36,7 +37,12 @@ struct vpipe_meta_entry {
     __u32 src_v4l2_sequence;
     __u32 buffer_index;
 
-    __u64 timestamp_ns;
+
+    __u64 source_timestamp_ns;
+    __u64 qbuf_timestamp_ns;
+    __u64 capture_done_ns;
+    __u64 dqbuf_timestamp_ns;
+
     __u32 bytesused;
     __u32 crc32;
 
@@ -49,6 +55,12 @@ struct vpipe_meta_entry {
     __s32 roi_height;
     __u64 algo_value0;
     __u64 algo_value1;
+
+    /* Source and transport metadata */
+    __u32 source_backend;
+    __u32 buffer_type;
+    __u32 queue_depth;
+    __u32 cpu_id;
 };
 
 struct vpipe_meta_info {

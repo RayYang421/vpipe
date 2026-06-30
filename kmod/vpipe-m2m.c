@@ -5,6 +5,7 @@
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/slab.h>
+#include <linux/smp.h>
 #include <linux/timekeeping.h>
 
 #include <media/v4l2-event.h>
@@ -178,6 +179,9 @@ static void vpipe_buf_queue(struct vb2_buffer *vb)
         buf->src_desc.height = ctx->out_q.height;
         buf->src_desc.stride = ctx->out_q.bytesperline;
 
+        /* Record QBUF time for the per-frame pipeline timeline. */
+        buf->qbuf_ns = ktime_get_ns();
+
         /* Ask the source backend to stamp this buffer with its provenance.
          * FIXTURE is a no-op; the helper still fills backend_id, sequence,
          * and timestamp so metadata downstream stays consistent.
@@ -227,10 +231,30 @@ static void vpipe_stop_streaming(struct vb2_queue *q)
     vpipe_return_all_buffers(ctx, q->type);
 }
 
+static void vpipe_buf_finish(struct vb2_buffer *vb)
+{
+    struct vpipe_buffer *buf = vb_to_vpipe_buffer(vb);
+
+    /* Called by vb2 just before DQBUF returns to userspace (CAPTURE side
+     * only; OUTPUT buffers have no pending metadata).  Stamp the dequeue
+     * time and publish the complete per-frame entry so the timeline covers
+     * source → qbuf → capture_done → dqbuf.
+     */
+    if (V4L2_TYPE_IS_OUTPUT(vb->vb2_queue->type))
+        return;
+    if (!buf->meta_pending.seq)
+        return;
+
+    buf->meta_pending.dqbuf_timestamp_ns = ktime_get_ns();
+    vpipe_meta_publish(&buf->meta_pending);
+    buf->meta_pending.seq = 0;
+}
+
 static const struct vb2_ops vpipe_qops = {
     .queue_setup = vpipe_queue_setup,
     .buf_prepare = vpipe_buf_prepare,
     .buf_queue = vpipe_buf_queue,
+    .buf_finish = vpipe_buf_finish,
     .start_streaming = vpipe_start_streaming,
     .stop_streaming = vpipe_stop_streaming,
     .wait_prepare = vb2_ops_wait_prepare,
@@ -393,6 +417,7 @@ static void vpipe_device_run(void *priv)
     struct vb2_v4l2_buffer *src_vbuf;
     struct vb2_v4l2_buffer *dst_vbuf;
     struct vpipe_buffer *src_buf;
+    struct vpipe_buffer *dst_buf;
     struct vpipe_job_desc job;
     struct vpipe_cv_result cv_result;
     struct vpipe_meta_entry meta = {0};
@@ -451,14 +476,21 @@ static void vpipe_device_run(void *priv)
     dst_vbuf->flags = src_vbuf->flags & V4L2_BUF_FLAG_TIMECODE;
     dst_vbuf->sequence = (u32) seq;
 
-    /* Sideband metadata mirrors the completed CAPTURE buffer, not the source.
+    /* Build the sideband metadata entry. dqbuf_timestamp_ns is left zero
+     * here and filled in by buf_finish() just before DQBUF returns to
+     * userspace, completing the per-frame pipeline timeline.
      */
+    meta.version = VPIPE_META_VERSION;
+    meta.entry_size = sizeof(meta);
     meta.seq = seq;
     meta.src_v4l2_sequence = src_buf->src_sequence;
     meta.buffer_index = dst_vbuf->vb2_buf.index;
-    meta.timestamp_ns = dst_vbuf->vb2_buf.timestamp;
+    meta.source_timestamp_ns = src_buf->src_desc.source_timestamp_ns;
+    meta.qbuf_timestamp_ns = src_buf->qbuf_ns;
+    meta.capture_done_ns = dst_vbuf->vb2_buf.timestamp;
+    meta.dqbuf_timestamp_ns = 0; /* filled in buf_finish() */
     meta.bytesused = ctx->cap_q.sizeimage;
-    meta.crc32 = crc32_le(~0, dst_addr, ctx->cap_q.sizeimage);
+    meta.crc32 = ~crc32_le(~0, dst_addr, ctx->cap_q.sizeimage);
     meta.algo_id = src_buf->algo_id;
     meta.algo_status = cv_result.algo_status;
     meta.roi_left = cv_result.roi.left;
@@ -467,8 +499,19 @@ static void vpipe_device_run(void *priv)
     meta.roi_height = cv_result.roi.height;
     meta.algo_value0 = cv_result.value0;
     meta.algo_value1 = cv_result.value1;
+    meta.source_backend = src_buf->src_desc.backend_id;
+    meta.buffer_type = src_vbuf->vb2_buf.memory;
+    meta.queue_depth = v4l2_m2m_num_src_bufs_ready(ctx->m2m_ctx);
+    meta.cpu_id = raw_smp_processor_id();
+    if (src_buf->src_desc.flags & VPIPE_FRAME_FLAG_DROPPED)
+        meta.flags |= VPIPE_META_F_DROPPED;
 
-    vpipe_meta_publish(&meta);
+    /* Store in the destination buffer; buf_finish() will stamp
+     * dqbuf_timestamp_ns and publish.
+     */
+    dst_buf = container_of(dst_vbuf, struct vpipe_buffer, m2m_buf.vb);
+    dst_buf->meta_pending = meta;
+
     v4l2_m2m_buf_done(src_vbuf, VB2_BUF_STATE_DONE);
     v4l2_m2m_buf_done(dst_vbuf, VB2_BUF_STATE_DONE);
     v4l2_m2m_job_finish(ctx->dev->m2m_dev, ctx->m2m_ctx);

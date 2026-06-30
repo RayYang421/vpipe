@@ -27,9 +27,13 @@ int main(int argc, char **argv)
     }
 
     fp = vpipe_open_csv(csv,
-                        "seq,src_v4l2_sequence,buffer_index,timestamp_ns,"
-                        "bytesused,crc32,algo_id,algo_status,roi_left,roi_top,"
-                        "roi_width,roi_height,algo_value0,algo_value1,flags");
+                        "seq,src_v4l2_sequence,buffer_index,"
+                        "source_timestamp_ns,qbuf_timestamp_ns,"
+                        "capture_done_ns,dqbuf_timestamp_ns,"
+                        "bytesused,crc32,algo_id,algo_status,"
+                        "roi_left,roi_top,roi_width,roi_height,"
+                        "algo_value0,algo_value1,"
+                        "source_backend,buffer_type,queue_depth,cpu_id,flags");
     if (!fp) {
         perror("csv");
         return 1;
@@ -47,14 +51,24 @@ int main(int argc, char **argv)
             break;
 
         fprintf(fp,
-                "%" PRIu64 ",%u,%u,%" PRIu64 ",%u,%u,%u,%u,%d,%d,%d,%d,%" PRIu64
-                ",%" PRIu64 ",%u\n",
+                "%" PRIu64 ",%u,%u"
+                ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64
+                ",%u,%u,%u,%u"
+                ",%d,%d,%d,%d"
+                ",%" PRIu64 ",%" PRIu64
+                ",%u,%u,%u,%u,%u\n",
                 (uint64_t) entry.seq, entry.src_v4l2_sequence,
-                entry.buffer_index, (uint64_t) entry.timestamp_ns,
+                entry.buffer_index,
+                (uint64_t) entry.source_timestamp_ns,
+                (uint64_t) entry.qbuf_timestamp_ns,
+                (uint64_t) entry.capture_done_ns,
+                (uint64_t) entry.dqbuf_timestamp_ns,
                 entry.bytesused, entry.crc32, entry.algo_id, entry.algo_status,
                 entry.roi_left, entry.roi_top, entry.roi_width,
-                entry.roi_height, (uint64_t) entry.algo_value0,
-                (uint64_t) entry.algo_value1, entry.flags);
+                entry.roi_height,
+                (uint64_t) entry.algo_value0, (uint64_t) entry.algo_value1,
+                entry.source_backend, entry.buffer_type,
+                entry.queue_depth, entry.cpu_id, entry.flags);
     }
 
     fclose(fp);
