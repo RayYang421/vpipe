@@ -16,7 +16,8 @@ BINARIES := \
 	vpipe-pgm-diff \
 	vpipe-vcam-dmabuf-test \
 	vpipe-vcam-bench \
-	vpipe-vcam-dmabuf-bench
+	vpipe-vcam-dmabuf-bench \
+	vpipe-vcam-runner
 TEST_BINARIES := vpipe-unit-test
 
 .PHONY: all clean test
@@ -38,7 +39,7 @@ vpipe-unit-test: vpipe-unit-test.o $(COMMON_OBJS)
 vpipe-vcam-dmabuf-test: vpipe-vcam-dmabuf-test.o $(COMMON_OBJS)
 vpipe-vcam-bench: vpipe-vcam-bench.o $(COMMON_OBJS)
 vpipe-vcam-dmabuf-bench: vpipe-vcam-dmabuf-bench.o $(COMMON_OBJS)
-
+vpipe-vcam-runner: vpipe-vcam-runner.o $(COMMON_OBJS)
 test: vpipe-unit-test
 	./vpipe-unit-test
 
